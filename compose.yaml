@@ -1,0 +1,44 @@
+services:
+  uploader:
+    build: .
+    image: nexus-auto-uploader:local
+    user: "${UPLOADER_UID:-10001}:${UPLOADER_GID:-10001}"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 1h
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    environment:
+      TMPDIR: /data/processing
+      INPUT_DIR: /data/input
+      INPUT_DIRS: "${INPUT_DIRS:-}"
+      PROCESSING_DIR: /data/processing
+      SUCCESS_DIR: /data/success
+      ERROR_DIR: /data/error
+      DOCKER_REGISTRY: "${DOCKER_REGISTRY:-}"
+      DOCKER_USERNAME: "${DOCKER_USERNAME:-}"
+      DOCKER_PASSWORD: "${DOCKER_PASSWORD:-}"
+      PYPI_URL: "${PYPI_URL:-}"
+      PYPI_USERNAME: "${PYPI_USERNAME:-}"
+      PYPI_PASSWORD: "${PYPI_PASSWORD:-}"
+      TLS_VERIFY: "${TLS_VERIFY:-true}"
+      DOCKER_TLS_VERIFY: "${DOCKER_TLS_VERIFY:-${TLS_VERIFY:-true}}"
+      PYPI_TLS_VERIFY: "${PYPI_TLS_VERIFY:-${TLS_VERIFY:-true}}"
+      CA_BUNDLE: "${CA_BUNDLE:-}"
+      IMAGE_PREFIX_MODE: "${IMAGE_PREFIX_MODE:-prepend}"
+      IMAGE_PREFIX: "${IMAGE_PREFIX:-}"
+      IMAGE_SOURCE_PREFIX: "${IMAGE_SOURCE_PREFIX:-}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-2}"
+      STABLE_SECONDS: "${STABLE_SECONDS:-10}"
+      UPLOAD_TIMEOUT: "${UPLOAD_TIMEOUT:-300}"
+      UPLOAD_RETRIES: "${UPLOAD_RETRIES:-2}"
+      SKOPEO_BIN: /usr/bin/skopeo
+    volumes:
+      - ./data/input:/data/input
+      - ./data/processing:/data/processing
+      - ./data/success:/data/success
+      - ./data/error:/data/error
+      - ./certs:/certs:ro
