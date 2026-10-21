@@ -7,7 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Lazza351" }]
 requires-python = ">=3.11,<3.15"
-dependencies = ["twine>=6.2,<7", "requests>=2.32.4,<3"]
+dependencies = ["docker>=7.1,<8", "twine>=6.2,<7", "requests>=2.32.4,<3"]
 
 [project.scripts]
 nexus-auto-uploader = "nexus_uploader.cli:main"

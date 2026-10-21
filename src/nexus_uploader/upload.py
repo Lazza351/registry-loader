@@ -1,19 +1,14 @@
-"""Daemonless Docker copy and Twine multipart upload; errors are deliberately sanitized."""
+"""Docker Engine image loading/push and Twine multipart upload; errors are sanitized."""
 
-import base64
 import contextlib
-import gzip
 import io
 import json
 import logging
-import os
-import shutil
-import subprocess
-import tempfile
 import time
-from pathlib import Path
 
+import docker
 import requests
+from docker.errors import DockerException
 from requests.adapters import HTTPAdapter
 from twine.package import PackageFile
 from twine.repository import Repository
@@ -71,23 +66,15 @@ class Uploader:
         if len(set(destinations)) != len(destinations):
             raise UploadError("Image prefix maps multiple source tags to the same destination")
         results = []
-        with tempfile.TemporaryDirectory(prefix="nexus-auth-") as folder:
-            source_path = path
-            # Bookworm skopeo 1.9 does not decompress docker-archive gzip sources.
-            # Decode once for all tags and keep image-sized temporary data on TMPDIR.
-            with path.open("rb") as probe:
-                compressed = probe.read(2) == b"\x1f\x8b"
-            if compressed:
-                source_path = Path(folder) / "archive.tar"
-                with gzip.open(path, "rb") as src, source_path.open("xb") as dst:
-                    shutil.copyfileobj(src, dst, length=1024 * 1024)
-            auth = Path(folder) / "auth.json"
-            credentials = base64.b64encode(f"{c.docker_user}:{c.docker_password}".encode()).decode()
-            fd = os.open(auth, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as stream:
-                json.dump({"auths": {c.registry: {"auth": credentials}}}, stream)
-            if c.ca_bundle:
-                shutil.copyfile(c.ca_bundle, Path(folder) / "ca.crt")
+        client = None
+        try:
+            # Use the local socket explicitly; DOCKER_TLS_VERIFY is for the registry.
+            client = docker.DockerClient(
+                base_url="unix:///var/run/docker.sock", timeout=c.timeout, version="auto"
+            )
+            with path.open("rb") as archive:
+                client.images.load(archive)
+            auth = {"username": c.docker_user, "password": c.docker_password}
             for tag, destination in zip(tags, destinations):
                 started = time.monotonic()
                 result = {
@@ -96,41 +83,38 @@ class Uploader:
                     "destination": f"{c.registry}/{destination}",
                     "status": "error",
                 }
-                argv = [
-                    c.skopeo,
-                    "--tmpdir",
-                    folder,
-                    "copy",
-                    "--authfile",
-                    str(auth),
-                    f"--dest-tls-verify={str(c.docker_tls).lower()}",
-                ]
-                if c.ca_bundle:
-                    argv += ["--dest-cert-dir", folder]
-                argv += [
-                    f"docker-archive:{source_path}:{tag}",
-                    f"docker://{c.registry}/{destination}",
-                ]
-                for attempt in range(c.retries + 1):
-                    try:
-                        subprocess.run(
-                            argv,
-                            check=True,
-                            timeout=c.timeout,
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                        result["status"] = "success"
-                        break
-                    except (OSError, subprocess.SubprocessError):
-                        if attempt < c.retries:
+                repository, target_tag = destination.rsplit(":", 1)
+                target = f"{c.registry}/{repository}"
+                try:
+                    image = client.images.get(tag)
+                    if not image.tag(target, tag=target_tag, force=True):
+                        raise DockerException("Image retag failed")
+                    for attempt in range(c.retries + 1):
+                        try:
+                            stream = client.api.push(
+                                target, tag=target_tag, auth_config=auth, stream=True, decode=True
+                            )
+                            for event in stream:
+                                if event.get("error") or event.get("errorDetail"):
+                                    raise DockerException("Registry push failed")
+                            result["status"] = "success"
+                            break
+                        except DockerException:
+                            if attempt == c.retries:
+                                break
                             time.sleep(min(2**attempt, 8))
+                except DockerException:
+                    pass
                 result["duration"] = round(time.monotonic() - started, 3)
                 if result["status"] == "error":
                     result["error"] = "Docker upload failed (remote output suppressed)"
                 results.append(result)
                 log.info("tag_result %s", json.dumps(result, ensure_ascii=True))
+        except DockerException:
+            raise UploadError("Docker daemon load failed") from None
+        finally:
+            if client is not None:
+                client.close()
         if any(r["status"] == "error" for r in results):
             raise UploadError("Docker upload failed; see per-tag results", results)
         return results

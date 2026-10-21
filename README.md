@@ -1,10 +1,10 @@
 # Nexus Auto Uploader
 
-Сервис для Linux: опрашивает один или несколько каталогов и загружает Docker-образы и Python-пакеты в Nexus. Работает без Docker daemon/socket внутри контейнера: образы переносит `skopeo`, Python-пакеты отправляет Twine по стандартному multipart-протоколу PyPI.
+Сервис для Linux: опрашивает один или несколько каталогов и загружает Docker-образы и Python-пакеты в Nexus. Docker-архивы загружаются в локальный Docker Engine через `/var/run/docker.sock`, затем образы получают целевые теги и отправляются в registry; Python-пакеты отправляются Twine по стандартному multipart-протоколу PyPI.
 
 ## Возможности
 
-- Docker `docker save`: `.tar`, `.tar.gz`; все образы и теги из архива.
+- Docker `docker save`: `.tar`, `.tar.gz`; все образы и теги из архива. Загрузка, retag и push выполняются через Docker Engine socket.
 - PyPI: `.whl`, source distributions `.tar.gz` и `.zip`.
 - Один смешанный входной каталог или несколько каталогов через `INPUT_DIRS`. Рекурсивного обхода нет.
 - Добавление/замена namespace-префикса; исходный registry заменяется целевым, теги сохраняются.
@@ -37,7 +37,9 @@ docker compose up -d
 docker compose logs -f --tail=100 uploader
 ```
 
-Не публикуйте вывод `docker compose config` без `--quiet`: он содержит подставленные пароли. `.env`, рабочие данные и сертификаты исключены из Git и Docker build context. Контейнер работает под UID/GID 10001 с read-only root filesystem и без привилегий. `UPLOADER_UID`/`UPLOADER_GID` позволяют выбрать другой UID/GID; выставьте соответствующие права на **все** data-каталоги.
+Перед запуском замените `DOCKER_SOCKET_GID` в `.env` на GID группы сокета на Linux-хосте: `stat -c '%g' /var/run/docker.sock`. Значение `999` в примере — только заглушка; неверный GID приведёт к отказу доступа к сокету.
+
+Не публикуйте вывод `docker compose config` без `--quiet`: он содержит подставленные пароли. `.env`, рабочие данные и сертификаты исключены из Git и Docker build context. Контейнер работает под UID/GID 10001 с read-only root filesystem и без привилегий, но доступ к Docker socket фактически даёт широкие права на Docker-хост. Для доступа выставьте `DOCKER_SOCKET_GID` равным группе сокета хоста (например, `stat -c '%g' /var/run/docker.sock`); выставьте права UID/GID на **все** data-каталоги.
 
 `compose.yaml` монтирует `./data/input`, `./data/processing`, `./data/success`, `./data/error` и `./certs`. Для существующих каталогов на сервере измените левые части bind mounts или используйте Compose override. Пути в `INPUT_DIRS` должны быть видны внутри контейнера.
 
@@ -67,19 +69,18 @@ SIGTERM прекращает приём новых заданий после т�
 | `DOCKER_USERNAME`, `DOCKER_PASSWORD` | пусто | Docker credentials |
 | `PYPI_URL` | пусто | URL загрузки в hosted PyPI repository |
 | `PYPI_USERNAME`, `PYPI_PASSWORD` | пусто | PyPI credentials |
-| `TLS_VERIFY` | `true` | Общая настройка проверки TLS |
-| `DOCKER_TLS_VERIFY`, `PYPI_TLS_VERIFY` | наследуют `TLS_VERIFY` | Отдельные настройки; пустое значение наследует общую |
-| `CA_BUNDLE` | пусто | Путь к PEM CA bundle внутри контейнера/на локальной машине |
+| `TLS_VERIFY` | `true` | Проверка TLS для PyPI |
+| `PYPI_TLS_VERIFY` | наследует `TLS_VERIFY` | Проверка TLS для PyPI; пустое значение наследует общую |
+| `CA_BUNDLE` | пусто | Путь к PEM CA bundle для PyPI внутри контейнера/на локальной машине |
 | `IMAGE_PREFIX_MODE` | `prepend` | `prepend` или `replace` |
 | `IMAGE_PREFIX` | пусто | Новый namespace-префикс, без целевого registry |
 | `IMAGE_SOURCE_PREFIX` | пусто | Старый префикс для `replace`; обязателен в этом режиме |
 | `POLL_INTERVAL` | `2` | Интервал опроса в секундах, положительное число |
 | `STABLE_SECONDS` | `10` | Сколько секунд сигнатура файла должна оставаться неизменной |
-| `UPLOAD_TIMEOUT` | `300` | Таймаут одной попытки `skopeo`; HTTP read timeout (connect — не более 10 с), не общий дедлайн всей очереди |
+| `UPLOAD_TIMEOUT` | `300` | Таймаут запросов к Docker Engine и HTTP read timeout PyPI (connect — не более 10 с), не общий дедлайн всей очереди |
 | `UPLOAD_RETRIES` | `2` | Дополнительные попытки после первой, от 0 до 10; backoff 1/2/4/8 с |
-| `SKOPEO_BIN` | `skopeo` (Compose: `/usr/bin/skopeo`) | Исполняемый файл skopeo |
-| `TMPDIR` | системный temp; контейнер: `/data/processing` | Writable disk для authfile и image-sized временных файлов |
 | `UPLOADER_UID`, `UPLOADER_GID` | `10001` | Пользователь контейнера (только Compose) |
+| `DOCKER_SOCKET_GID` | `999` (пример) | GID группы Docker socket на хосте (Compose); обязательно замените на фактический GID |
 
 Каталоги очереди и все входные каталоги не должны совпадать или быть вложены друг в друга. Если один протокол не настроен, относящийся к нему файл попадёт в error с соответствующей причиной; другой протокол продолжит работать.
 
@@ -114,7 +115,7 @@ cp /secure/path/company-ca.pem certs/company-ca.pem
 # В .env: CA_BUNDLE=/certs/company-ca.pem, TLS_VERIFY=true
 ```
 
-`CA_BUNDLE` применяется к обоим протоколам. Для временного отключения проверки задайте `TLS_VERIFY=false` либо отдельный флаг. Это небезопасно: отключаются проверка цепочки и hostname; у `skopeo` также возможен fallback на HTTP. Явный `http://` в `PYPI_URL` всегда передаёт данные без TLS, независимо от verify. Предпочитайте корректный HTTPS и доверенный CA.
+`CA_BUNDLE` задаёт CA для PyPI upload. Для Docker push TLS и доверенные CA настраиваются в самом Docker Engine хоста. `TLS_VERIFY` не меняет соединение с локальным Unix socket. Явный `http://` в `PYPI_URL` всегда передаёт данные без TLS, независимо от verify. Предпочитайте корректный HTTPS и доверенный CA.
 
 ## Как подавать файлы
 
@@ -135,7 +136,7 @@ mv data/input/example-1.0-py3-none-any.whl.part data/input/example-1.0-py3-none-
 
 Для отдельных входных каталогов задайте `INPUT_DIRS=/data/input/docker,/data/input/pypi`, создайте эти подкаталоги и выставьте права UID/GID сервиса. Существующие файлы подхватываются при старте. Symlinks, подкаталоги и неподдерживаемые суффиксы игнорируются.
 
-`.tar.gz` распознаётся по Docker `manifest.json`; иначе считается Python sdist. Это **не** `docker export` и не OCI archive. Нетегированные образы, некорректные/неоднозначные manifests и коллизии итоговых тегов отклоняются до отправки. Архивы не извлекаются в файловое дерево; gzip Docker save предварительно распаковывается в закрытый временный tar для совместимости с Bookworm skopeo.
+`.tar.gz` распознаётся по Docker `manifest.json`; иначе считается Python sdist. Это **не** `docker export` и не OCI archive. Нетегированные образы, некорректные/неоднозначные manifests и коллизии итоговых тегов отклоняются до загрузки. Архив целиком загружается в Docker Engine; Engine должен иметь достаточно места для образов. Образы и добавленные целевые теги остаются в daemon после push.
 
 ## Результаты, ошибки и восстановление
 
@@ -146,7 +147,7 @@ data/error/job-<uuid>/images.tar.gz
 data/error/job-<uuid>/result.json
 ```
 
-В отчёте: исходное имя, тип, `status`, длительность, причина ошибки и результаты по каждому Docker-тегу (source tag, destination, status). Логи в stdout содержат timestamps и результаты; credentials и сырой ответ сервера/`skopeo` не публикуются.
+В отчёте: исходное имя, тип, `status`, длительность, причина ошибки и результаты по каждому Docker-тегу (source tag, destination, status). Логи в stdout содержат timestamps и результаты; credentials и сырой ответ сервера/Docker Engine не публикуются.
 
 Загрузка многотегового архива не является транзакцией: если хотя бы один тег не загрузился, **весь исходный архив** идёт в error, а `result.json` показывает, что уже загружено. Rollback удалённых тегов не выполняется. После устранения причины скопируйте исходный файл обратно через `.part` + rename; не переносите в input сам `result.json`/каталог задания.
 
@@ -156,11 +157,11 @@ data/error/job-<uuid>/result.json
 
 При переносе между файловыми системами копия сначала пишется в неподдерживаемое временное имя и только затем атомарно публикуется как готовый payload: обрыв копирования не отправит частичный архив. Подменённый при захвате файл не загружается; захваченная подмена отправляется в карантин error. Symlink не разыменовывается при восстановлении/архивировании. Если terminal-каталог с таким UUID уже существует, исходный processing удаляется только после проверки идентичности имён и содержимого; при конфликте он сохраняется с логом `terminal_collision`. Для локальной устойчивости выполняется fsync данных и каталогов; гарантии конкретной NFS/storage-системы всё равно зависят от её конфигурации.
 
-**Диск:** нужны место для оригинального архива, распакованного tar, временной копии `skopeo` и terminal staging. Для gzip-образов резервируйте как минимум несколько размеров **распакованного** архива. Не направляйте image-sized temp в маленький RAM tmpfs. После аварийного убийства могут остаться временные файлы вне `job-*`; инспектируйте их и удаляйте только при остановленном сервисе. Success/error автоматически не очищаются: настройте внешнюю retention-политику.
+**Диск:** нужны место для оригинального архива и Docker Engine image store; при обработке Docker также используются terminal staging файлы. Учитывайте хранилище и политики очистки Docker Engine отдельно. Success/error автоматически не очищаются: настройте внешнюю retention-политику.
 
 ## Локальный запуск и тесты
 
-Нужны Linux, Python 3.11+ (проверено 3.11 в контейнере и 3.13 локально), `uv` и `skopeo` (например, пакет дистрибутива). Установка зависимостей воспроизводима по `uv.lock`:
+Нужны Linux, работающий Docker Engine с доступным `/var/run/docker.sock`, Python 3.11+ и `uv`. Установка зависимостей воспроизводима по `uv.lock`:
 
 ```bash
 uv sync --frozen
@@ -182,7 +183,7 @@ uv build
 
 `--check-config` проверяет синтаксис настроек, но не связь с Nexus/права на запись. `--once` возвращает 0 при завершённом проходе даже при ошибках отдельных файлов: проверяйте `result.json`; 1 — фатальная ошибка очереди/lock, 2 — неверная конфигурация.
 
-Тесты используют временные файлы, реальный локальный HTTP multipart upload и управляемый subprocess seam; реальные Nexus credentials не нужны. Для проверки конкретного Nexus после деплоя отправьте небольшой тестовый Docker save/пакет, проверьте `result.json`, наличие тегов/версии в Nexus и сделайте pull/download точного артефакта.
+Тесты используют временные файлы, реальный локальный HTTP multipart upload и управляемый Docker SDK seam; реальные Docker daemon и Nexus credentials не нужны. Для проверки после деплоя отправьте небольшой тестовый Docker save/пакет, проверьте `result.json`, наличие тегов/версии в Nexus и сделайте pull/download точного артефакта.
 
 ## Лицензия и участие
 

@@ -8,11 +8,12 @@ services:
     stop_grace_period: 1h
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+      - "/tmp:rw,noexec,nosuid,size=64m,mode=1777"
+    group_add:
+      - "${DOCKER_SOCKET_GID:-999}"
     environment:
-      TMPDIR: /data/processing
       INPUT_DIR: /data/input
       INPUT_DIRS: "${INPUT_DIRS:-}"
       PROCESSING_DIR: /data/processing
@@ -25,7 +26,6 @@ services:
       PYPI_USERNAME: "${PYPI_USERNAME:-}"
       PYPI_PASSWORD: "${PYPI_PASSWORD:-}"
       TLS_VERIFY: "${TLS_VERIFY:-true}"
-      DOCKER_TLS_VERIFY: "${DOCKER_TLS_VERIFY:-${TLS_VERIFY:-true}}"
       PYPI_TLS_VERIFY: "${PYPI_TLS_VERIFY:-${TLS_VERIFY:-true}}"
       CA_BUNDLE: "${CA_BUNDLE:-}"
       IMAGE_PREFIX_MODE: "${IMAGE_PREFIX_MODE:-prepend}"
@@ -35,10 +35,10 @@ services:
       STABLE_SECONDS: "${STABLE_SECONDS:-10}"
       UPLOAD_TIMEOUT: "${UPLOAD_TIMEOUT:-300}"
       UPLOAD_RETRIES: "${UPLOAD_RETRIES:-2}"
-      SKOPEO_BIN: /usr/bin/skopeo
     volumes:
       - ./data/input:/data/input
       - ./data/processing:/data/processing
       - ./data/success:/data/success
       - ./data/error:/data/error
       - ./certs:/certs:ro
+      - /var/run/docker.sock:/var/run/docker.sock

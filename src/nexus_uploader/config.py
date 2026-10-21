@@ -26,7 +26,6 @@ class Config:
     docker_password: str = field(default="", repr=False)
     pypi_user: str = field(default="", repr=False)
     pypi_password: str = field(default="", repr=False)
-    docker_tls: bool = True
     pypi_tls: bool = True
     ca_bundle: str = ""
     prefix: str = ""
@@ -36,7 +35,6 @@ class Config:
     stable: float = 10
     timeout: float = 300
     retries: int = 2
-    skopeo: str = "skopeo"
     extra_input_dirs: tuple[Path, ...] = ()
 
     @property
@@ -122,7 +120,6 @@ class Config:
             docker_password=env.get("DOCKER_PASSWORD", ""),
             pypi_user=env.get("PYPI_USERNAME", ""),
             pypi_password=env.get("PYPI_PASSWORD", ""),
-            docker_tls=boolean(env.get("DOCKER_TLS_VERIFY") or tls),
             pypi_tls=boolean(env.get("PYPI_TLS_VERIFY") or tls),
             ca_bundle=ca,
             prefix=prefix,
@@ -132,7 +129,6 @@ class Config:
             stable=numbers[1],
             timeout=numbers[2],
             retries=retries,
-            skopeo=env.get("SKOPEO_BIN", "skopeo"),
             extra_input_dirs=tuple(inputs[1:]),
         )
 
