@@ -136,7 +136,7 @@ class Uploader:
                 try:
                     # _upload prints package names; suppress to preserve structured logs.
                     with contextlib.redirect_stdout(io.StringIO()):
-                        # Pinned Twine 6.x single-attempt seam: public upload logs untrusted
+                        # Pinned Twine 7.0.0 single-attempt seam: public upload logs untrusted
                         # response.reason and adds implicit retries. Own retries stay sanitized.
                         response = repository._upload(package)
                     status = response.status_code

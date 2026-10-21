@@ -5,15 +5,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from docker.errors import DockerException
 from test_archives import archive
+from twine.package import PackageFile
 
 from nexus_uploader.config import Config
 from nexus_uploader.upload import Uploader, UploadError
 
 
-def wheel(path):
+def wheel(path, metadata_version="2.1"):
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(
-            "demo-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: demo\nVersion: 1.0\n"
+            "demo-1.0.dist-info/METADATA",
+            f"Metadata-Version: {metadata_version}\nName: demo\nVersion: 1.0\n",
         )
         z.writestr(
             "demo-1.0.dist-info/WHEEL",
@@ -22,7 +24,18 @@ def wheel(path):
     return path
 
 
-def test_real_pypi_upload_retry_and_auth(tmp_path, caplog):
+def test_package_file_accepts_metadata_2_5(tmp_path):
+    path = wheel(tmp_path / "demo-1.0-py3-none-any.whl", metadata_version="2.5")
+
+    package = PackageFile.from_filename(str(path), None)
+
+    assert package.metadata["metadata_version"] == "2.5"
+    assert package.metadata["name"] == "demo"
+    assert package.metadata["version"] == "1.0"
+
+
+@pytest.mark.parametrize("metadata_version", ["2.1", "2.5"])
+def test_real_pypi_upload_retry_and_auth(tmp_path, caplog, metadata_version):
     received = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -48,13 +61,15 @@ def test_real_pypi_upload_retry_and_auth(tmp_path, caplog):
                 "UPLOAD_RETRIES": "1",
             }
         )
-        Uploader(c).upload(wheel(tmp_path / "demo-1.0-py3-none-any.whl"))
+        path = wheel(tmp_path / "demo-1.0-py3-none-any.whl", metadata_version=metadata_version)
+        assert Uploader(c).upload(path)[0]["status"] == "success"
         assert len(received) == 2
         assert "REMOTE_PASSWORD_SECRET" not in caplog.text
         assert received[-1][0] == "/repository/pypi/"
         assert received[-1][1]["Authorization"].startswith("Basic ")
         assert b'name="content"; filename="demo-1.0-py3-none-any.whl"' in received[-1][2]
         assert b"file_upload" in received[-1][2]
+        assert f'name="metadata_version"\r\n\r\n{metadata_version}\r\n'.encode() in received[-1][2]
     finally:
         server.shutdown()
         server.server_close()
@@ -99,7 +114,9 @@ def test_docker_socket_load_retag_and_push_all_tags(tmp_path, monkeypatch):
 
     def create_client(**kwargs):
         assert kwargs == {
-            "base_url": "unix:///var/run/docker.sock", "timeout": 300, "version": "auto"
+            "base_url": "unix:///var/run/docker.sock",
+            "timeout": 300,
+            "version": "auto",
         }
         return Client()
 
@@ -110,8 +127,12 @@ def test_docker_socket_load_retag_and_push_all_tags(tmp_path, monkeypatch):
     assert calls[0][0] == "load"
     assert ("tag", "nexus.test:5000/mirror/team/app", "v1", True) in calls
     assert (
-        "push", "nexus.test:5000/mirror/team/app", "v1",
-        {"username": "u", "password": "TOPSECRET"}, True, True
+        "push",
+        "nexus.test:5000/mirror/team/app",
+        "v1",
+        {"username": "u", "password": "TOPSECRET"},
+        True,
+        True,
     ) in calls
     assert calls[-1] == ("close",)
 
