@@ -12,6 +12,7 @@ import time
 import uuid
 
 from .archives import classify
+from .ingress import IngressGuard, writer_open
 from .upload import UploadError
 
 log = logging.getLogger(__name__)
@@ -104,10 +105,13 @@ def move_file(source, target, expected=None):
 
 
 class Watcher:
-    def __init__(self, config, uploader):
+    def __init__(self, config, uploader, guard=None, probe=None):
         self.c, self.uploader = config, uploader
         self.seen = {}
         self.locks = []
+        self.guard = guard
+        self.probe = writer_open if probe is None else probe
+        self.startup = set()
 
     def __enter__(self):
         for directory in (
@@ -129,15 +133,27 @@ class Watcher:
                 lock.close()
             self.locks.clear()
             raise RuntimeError("Uploader already running for this input directory") from None
+        if self.guard is None:
+            self.guard = IngressGuard(self.c.watch_dirs)
+        # Entries present before the watch existed never produce a close event. They keep
+        # the stability-only path, otherwise an unavailable probe would stall them for good.
+        self.startup = {
+            signature(path)[:2]
+            for directory in self.c.watch_dirs
+            for path in directory.iterdir()
+        }
         return self
 
     def __exit__(self, *args):
+        if self.guard is not None:
+            self.guard.close()
         for lock in self.locks:
             lock.close()
         self.locks.clear()
 
     def scan(self, now=None, stop=None):
         now = time.monotonic() if now is None else now
+        self.guard.poll()
         # Complete/recover previously claimed files first; completion markers prevent reupload.
         for job in sorted(self.c.processing_dir.glob("job-*")):
             if stop is not None and stop.is_set():
@@ -159,6 +175,17 @@ class Watcher:
                     continue
                 if now - previous[1] < self.c.stable:
                     continue
+                if not self.guard.completed(path):
+                    writing = self.probe(path)
+                    if writing is True:
+                        self.seen[path] = (sig, now)
+                        continue
+                    if (
+                        writing is None
+                        and sig[:2] not in self.startup
+                        and self.guard.supported(path.parent)
+                    ):
+                        continue
                 job = self.c.processing_dir / ("job-" + uuid.uuid4().hex)
                 job.mkdir(mode=0o700)
                 try:
@@ -179,12 +206,14 @@ class Watcher:
                     else:
                         job.rmdir()
                     self.seen.pop(path, None)
+                    self.guard.forget(sig[:2])
                     continue
                 except Exception:
                     if not any(job.iterdir()):
                         job.rmdir()
                     raise
                 self.seen.pop(path, None)
+                self.guard.forget(sig[:2])
                 self._process(job)
             except OSError:
                 log.error("claim_error filename=%s status=error", json.dumps(path.name))

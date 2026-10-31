@@ -13,7 +13,7 @@ from requests.adapters import HTTPAdapter
 from twine.package import PackageFile
 from twine.repository import Repository
 
-from .archives import archive_tags, classify, read_manifest
+from .archives import archive_tags, classify, read_manifest, verify_payload
 from .config import image_target
 
 log = logging.getLogger(__name__)
@@ -44,6 +44,10 @@ class Uploader:
 
     def upload(self, path):
         kind = classify(path)
+        try:
+            verify_payload(path, kind)
+        except Exception:  # noqa: BLE001 -- never expose parser or filesystem exception text.
+            raise UploadError("Payload incomplete or corrupt; transfer was interrupted") from None
         try:
             if kind == "tar-gzip":
                 kind = "docker" if read_manifest(path) is not None else "pypi"

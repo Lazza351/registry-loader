@@ -1,8 +1,10 @@
-"""Read Docker manifest without extracting untrusted archive paths."""
+"""Verify payload integrity and read Docker manifests without extracting archive paths."""
 
+import gzip
 import json
 import re
 import tarfile
+import zipfile
 from pathlib import Path
 
 MAX_MANIFEST = 4 * 1024 * 1024
@@ -21,6 +23,33 @@ def classify(path):
     if name.endswith((".whl", ".zip")):
         return "pypi"
     return None
+
+
+def verify_payload(path, kind):
+    """Read container integrity before handing bytes to any upload backend."""
+    if kind == "docker":
+        with open(path, "rb") as stream:
+            stream.seek(0, 2)
+            if stream.tell() < 1024:
+                raise ValueError("Missing tar terminator")
+            stream.seek(-1024, 2)
+            if stream.read() != b"\0" * 1024:
+                raise ValueError("Missing tar terminator")
+        with tarfile.open(path, "r|") as archive:
+            for member in archive:
+                pass
+    elif kind == "tar-gzip":
+        with gzip.open(path, "rb") as stream:
+            with tarfile.open(fileobj=stream, mode="r|") as archive:
+                for member in archive:
+                    pass
+            # Tar stops at its zero blocks, before gzip necessarily checks CRC/ISIZE.
+            while stream.read(1024 * 1024):
+                pass
+    elif kind == "pypi":
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None:
+                raise ValueError("Bad ZIP member")
 
 
 def read_manifest(path):
