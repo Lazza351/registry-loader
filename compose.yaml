@@ -25,6 +25,8 @@ services:
       PYPI_URL: "${PYPI_URL:-}"
       PYPI_USERNAME: "${PYPI_USERNAME:-}"
       PYPI_PASSWORD: "${PYPI_PASSWORD:-}"
+      ALLOW_OVERWRITE: "${ALLOW_OVERWRITE:-false}"
+      NEXUS_API_URL: "${NEXUS_API_URL:-}"
       TLS_VERIFY: "${TLS_VERIFY:-true}"
       PYPI_TLS_VERIFY: "${PYPI_TLS_VERIFY:-${TLS_VERIFY:-true}}"
       CA_BUNDLE: "${CA_BUNDLE:-}"

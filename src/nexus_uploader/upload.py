@@ -17,6 +17,7 @@ from .archives import archive_tags, classify, read_manifest, verify_payload
 from .config import image_target
 
 log = logging.getLogger(__name__)
+_presence_warning_logged = False
 
 
 class UploadError(Exception):
@@ -69,10 +70,16 @@ class Uploader:
         destinations = [image_target(t, c) for t in tags]
         if len(set(destinations)) != len(destinations):
             raise UploadError("Image prefix maps multiple source tags to the same destination")
+        # Probe before loading: a rejected job must not leave images in the Engine store.
+        conflicts = [] if c.allow_overwrite else self._conflicts(tags, destinations)
+        if conflicts:
+            if len(conflicts) == len(destinations):
+                raise UploadError("Artifact already exists", conflicts)
+            raise UploadError("Docker upload rejected; see per-tag results", conflicts)
         results = []
         client = None
         try:
-            # Use the local socket explicitly; DOCKER_TLS_VERIFY is for the registry.
+            # Push TLS is managed by the Engine; use its local socket explicitly.
             client = docker.DockerClient(
                 base_url="unix:///var/run/docker.sock", timeout=c.timeout, version="auto"
             )
@@ -123,11 +130,43 @@ class Uploader:
             raise UploadError("Docker upload failed; see per-tag results", results)
         return results
 
+    def _conflicts(self, tags, destinations):
+        """Tags that already exist remotely; checked once per job, not per push attempt."""
+        from .presence import RegistryProbe
+
+        probe = RegistryProbe(self.config)
+        conflicts = []
+        for tag, destination in zip(tags, destinations):
+            repository, target_tag = destination.rsplit(":", 1)
+            if probe.tag_exists(repository, target_tag):
+                conflicts.append(
+                    {
+                        "kind": "docker",
+                        "tag": tag,
+                        "destination": f"{self.config.registry}/{destination}",
+                        "status": "error",
+                        "error": "Artifact already exists",
+                    }
+                )
+        return conflicts
+
     def _pypi(self, path):
+        from .presence import PyPIProbe
+
+        global _presence_warning_logged
         c = self.config
         if not c.pypi_url:
             raise UploadError("PYPI_URL is not configured")
         package = PackageFile.from_filename(str(path), None)
+        probe = PyPIProbe(c)
+        ids = probe.component_ids(package.metadata["name"], package.metadata["version"])
+        if ids:
+            if not c.allow_overwrite:
+                raise UploadError("Artifact already exists in the repository")
+            probe.delete_components(ids)
+        elif ids is None and not _presence_warning_logged:
+            _presence_warning_logged = True
+            log.warning("PyPI existence check is unavailable; proceeding with upload")
         # Twine is used only for metadata/multipart. Never run keyring or read .pypirc.
         repository = Repository(c.pypi_url, None, None, disable_progress_bar=True)
         repository.session.close()

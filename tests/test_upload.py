@@ -39,6 +39,10 @@ def test_real_pypi_upload_retry_and_auth(tmp_path, caplog, metadata_version):
     received = []
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)  # The new existence preflight finds no package.
+            self.end_headers()
+
         def do_POST(self):
             received.append(
                 (self.path, self.headers, self.rfile.read(int(self.headers["Content-Length"])))
@@ -120,6 +124,7 @@ def test_docker_socket_load_retag_and_push_all_tags(tmp_path, monkeypatch):
         }
         return Client()
 
+    monkeypatch.setattr("nexus_uploader.presence.RegistryProbe.tag_exists", lambda *args: False)
     monkeypatch.setattr("nexus_uploader.upload.docker.DockerClient", create_client)
     p = archive(tmp_path / "images.tar", [{"RepoTags": ["team/app:v1", "team/app:latest"]}])
     result = Uploader(c).upload(p)
@@ -166,6 +171,7 @@ def test_partial_failure_is_sanitized(tmp_path, monkeypatch):
         def close(self):
             pass
 
+    monkeypatch.setattr("nexus_uploader.presence.RegistryProbe.tag_exists", lambda *args: False)
     monkeypatch.setattr("nexus_uploader.upload.docker.DockerClient", lambda **kwargs: Client())
     p = archive(tmp_path / "a.tar", [{"RepoTags": ["a:one", "a:two", "a:three"]}])
     with pytest.raises(UploadError) as caught:
@@ -179,6 +185,7 @@ def test_timeout_and_missing_config_are_sanitized(tmp_path, monkeypatch):
     with pytest.raises(UploadError):
         Uploader(Config.from_env({})).upload(p)
 
+    monkeypatch.setattr("nexus_uploader.presence.RegistryProbe.tag_exists", lambda *args: False)
     monkeypatch.setattr(
         "nexus_uploader.upload.docker.DockerClient",
         lambda **kwargs: (_ for _ in ()).throw(DockerException("secret")),

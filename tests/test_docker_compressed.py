@@ -35,6 +35,7 @@ def test_compressed_docker_archive_is_streamed_to_daemon(tmp_path, monkeypatch):
         def close(self):
             pass
 
+    monkeypatch.setattr("nexus_uploader.presence.RegistryProbe.tag_exists", lambda *args: False)
     monkeypatch.setattr("nexus_uploader.upload.docker.DockerClient", lambda **kwargs: Client())
     config = Config.from_env({"DOCKER_REGISTRY": "registry.example", "UPLOAD_RETRIES": "0"})
     assert Uploader(config).upload(compressed)[0]["status"] == "success"

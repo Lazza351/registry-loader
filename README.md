@@ -18,7 +18,7 @@
 1. Docker **hosted** repository и его push endpoint — `host[:port]`, например `nexus.example.org:5000`. Это не URL `/repository/...`. Обычно необходимо включить Docker Bearer Token Realm и выдать учётной записи права чтения/добавления/изменения нужного repository.
 2. PyPI **hosted** upload endpoint, например `https://nexus.example.org/repository/pypi-hosted/`. **Не `/simple/`**, не proxy и не group для обычной загрузки.
 3. Учётная запись с минимально необходимыми правами. Anonymous write можно использовать только если это намеренно настроено в Nexus.
-4. Политика redeploy в Nexus определяет, разрешены ли повторные версии/теги. Сервис не удаляет существующие пакеты и не обходит эту политику.
+4. Политика redeploy в Nexus по-прежнему ограничивает Docker push. По умолчанию сервис отклоняет существующие артефакты; при явном `ALLOW_OVERWRITE=true` PyPI-компоненты удаляются через Nexus REST API перед загрузкой (нужны права удаления).
 
 ## Быстрый деплой с Docker Compose
 
@@ -68,10 +68,12 @@ SIGTERM прекращает приём новых заданий после т�
 | `DOCKER_REGISTRY` | пусто | Целевой Docker push registry `host[:port]` |
 | `DOCKER_USERNAME`, `DOCKER_PASSWORD` | пусто | Docker credentials |
 | `PYPI_URL` | пусто | URL загрузки в hosted PyPI repository |
-| `PYPI_USERNAME`, `PYPI_PASSWORD` | пусто | PyPI credentials |
-| `TLS_VERIFY` | `true` | Проверка TLS для PyPI |
-| `PYPI_TLS_VERIFY` | наследует `TLS_VERIFY` | Проверка TLS для PyPI; пустое значение наследует общую |
-| `CA_BUNDLE` | пусто | Путь к PEM CA bundle для PyPI внутри контейнера/на локальной машине |
+| `PYPI_USERNAME`, `PYPI_PASSWORD` | пусто | PyPI upload и Nexus REST API credentials |
+| `ALLOW_OVERWRITE` | `false` | Разрешить замену существующих тегов/версий; true/false/1/0 |
+| `NEXUS_API_URL` | пусто; выводится из `PYPI_URL`, если возможно | Необязательный корень Nexus REST API, например `https://nexus.example.org`; без credentials, query и fragment |
+| `TLS_VERIFY` | `true` | HTTPS для проверки Docker-тегов (false: HTTP); проверка TLS для PyPI по умолчанию |
+| `PYPI_TLS_VERIFY` | наследует `TLS_VERIFY` | Проверка TLS для PyPI upload и Nexus API; пустое значение наследует общую |
+| `CA_BUNDLE` | пусто | Путь к PEM CA bundle для PyPI/Nexus API и HTTPS-проверки Docker-тегов внутри контейнера/на локальной машине |
 | `IMAGE_PREFIX_MODE` | `prepend` | `prepend` или `replace` |
 | `IMAGE_PREFIX` | пусто | Новый namespace-префикс, без целевого registry |
 | `IMAGE_SOURCE_PREFIX` | пусто | Старый префикс для `replace`; обязателен в этом режиме |
@@ -83,6 +85,33 @@ SIGTERM прекращает приём новых заданий после т�
 | `DOCKER_SOCKET_GID` | `999` (пример) | GID группы Docker socket на хосте (Compose); обязательно замените на фактический GID |
 
 Каталоги очереди и все входные каталоги не должны совпадать или быть вложены друг в друга. Если один протокол не настроен, относящийся к нему файл попадёт в error с соответствующей причиной; другой протокол продолжит работать.
+
+### Политика перезаписи
+
+По умолчанию `ALLOW_OVERWRITE=false`: перед push проверяется каждый целевой Docker-тег,
+перед PyPI upload — имя проекта и версия. Существующий артефакт отклоняется с ошибкой
+`Artifact already exists` (PyPI: `Artifact already exists in the repository`), без статуса
+«пропущен». Задание попадает в `error/`, исходный payload сохраняется для ручной проверки.
+Для Docker проверка идёт до загрузки архива в Engine: если хотя бы один тег уже существует,
+задание отклоняется целиком — ничего не пушится и образы не остаются в локальном image store.
+Причина по каждому конфликтному тегу есть в `results`; если конфликтуют все теги архива,
+верхнеуровневая причина — `Artifact already exists`.
+
+При `ALLOW_OVERWRITE=true` Docker push заменяет целевой тег средствами registry.
+Для PyPI сначала удаляются найденные Nexus-компоненты через REST API, затем выполняется
+обычная загрузка Twine. Используются `PYPI_USERNAME`/`PYPI_PASSWORD`; им нужны права поиска
+и **удаления** в repository. Отказ удаления останавливает upload. Удаление затрагивает весь
+компонент (все его файлы), а не только загружаемый файл; операция не атомарна: при ошибке
+последующей загрузки удалённая версия не восстанавливается автоматически.
+
+Если `PYPI_URL` имеет вид `https://host/repository/name/` (в том числе с дальнейшим путём),
+имя repository берётся из `name`, а корень API — из схемы и host. `NEXUS_API_URL` позволяет
+явно задать другой корень, например `https://host/nexus` для reverse proxy.
+Если корень API или имя repository определить нельзя, проверка PyPI недоступна:
+**upload продолжается с одним предупреждением на процесс**, даже при `ALLOW_OVERWRITE=false`.
+Это fallback, а не гарантия защиты от перезаписи; итог определяет сервер. Ошибки настроенного
+API/registry не игнорируются. Проверка и upload — отдельные запросы: от конкурентной записи
+между ними защищает только политика самого сервера. `--check-config` не выполняет запросов.
 
 ### Примеры префиксов
 
@@ -115,7 +144,7 @@ cp /secure/path/company-ca.pem certs/company-ca.pem
 # В .env: CA_BUNDLE=/certs/company-ca.pem, TLS_VERIFY=true
 ```
 
-`CA_BUNDLE` задаёт CA для PyPI upload. Для Docker push TLS и доверенные CA настраиваются в самом Docker Engine хоста. `TLS_VERIFY` не меняет соединение с локальным Unix socket. Явный `http://` в `PYPI_URL` всегда передаёт данные без TLS, независимо от verify. Предпочитайте корректный HTTPS и доверенный CA.
+`CA_BUNDLE` задаёт CA для PyPI upload, Nexus API и HTTPS-проверки наличия Docker-тегов. При `TLS_VERIFY=false` проверка Docker-тегов использует HTTP; это передаёт Basic credentials без шифрования, используйте только в доверенной сети. Для Docker push TLS и доверенные CA настраиваются в самом Docker Engine хоста. `TLS_VERIFY` не меняет соединение с локальным Unix socket. Явный `http://` в `PYPI_URL`/`NEXUS_API_URL` всегда передаёт данные без TLS, независимо от verify. Предпочитайте корректный HTTPS и доверенный CA.
 
 ## Как подавать файлы
 

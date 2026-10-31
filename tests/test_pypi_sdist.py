@@ -25,6 +25,10 @@ def test_real_source_distribution_upload_and_no_redirect(tmp_path, status):
     received = []
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)  # No existing component before testing upload responses.
+            self.end_headers()
+
         def do_POST(self):
             received.append(self.rfile.read(int(self.headers["Content-Length"])))
             self.send_response(status)

@@ -36,6 +36,14 @@ class Config:
     timeout: float = 300
     retries: int = 2
     extra_input_dirs: tuple[Path, ...] = ()
+    allow_overwrite: bool = False
+    nexus_api_url: str = ""
+    registry_tls: bool = True
+
+    @property
+    def pypi_repository(self):
+        match = re.match(r"^/repository/([^/]+)(?:/|$)", urlsplit(self.pypi_url).path)
+        return match.group(1) if match else ""
 
     @property
     def watch_dirs(self):
@@ -82,6 +90,22 @@ class Config:
                 or "/simple" in u.path
             ):
                 raise ValueError("PYPI_URL must be a hosted upload URL, without credentials")
+        api_url = env.get("NEXUS_API_URL", "")
+        if api_url:
+            api = urlsplit(api_url)
+            if (
+                api.scheme not in {"http", "https"}
+                or not api.hostname
+                or api.username is not None
+                or api.password is not None
+                or api.query
+                or api.fragment
+            ):
+                raise ValueError("NEXUS_API_URL must be an HTTP URL without credentials")
+            api_url = api_url.rstrip("/")
+        elif url and re.match(r"^/repository/[^/]+(?:/|$)", urlsplit(url).path):
+            parsed = urlsplit(url)
+            api_url = f"{parsed.scheme}://{parsed.netloc}"
         mode = env.get("IMAGE_PREFIX_MODE", "prepend")
         if mode not in {"prepend", "replace"}:
             raise ValueError("Invalid IMAGE_PREFIX_MODE")
@@ -130,6 +154,9 @@ class Config:
             timeout=numbers[2],
             retries=retries,
             extra_input_dirs=tuple(inputs[1:]),
+            allow_overwrite=boolean(env.get("ALLOW_OVERWRITE", "false")),
+            nexus_api_url=api_url,
+            registry_tls=boolean(tls),
         )
 
 
