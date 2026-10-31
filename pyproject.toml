@@ -1,6 +1,6 @@
 [project]
 name = "nexus-auto-uploader"
-version = "0.1.0"
+version = "0.2.0"
 description = "Polling uploader for Nexus Docker and PyPI hosted repositories"
 readme = "README.md"
 license = "MIT"
